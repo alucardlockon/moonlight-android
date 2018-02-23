@@ -294,7 +294,58 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         if (prefConfig.videoFormat == PreferenceConfiguration.FORCE_H265_ON && !decoderRenderer.isHevcSupported()) {
             Toast.makeText(this, "No H.265 decoder found.\nFalling back to H.264.", Toast.LENGTH_LONG).show();
         }
-        
+
+        int gamepadMask = ControllerHandler.getAttachedControllerMask(this);
+        if (!prefConfig.multiController && gamepadMask != 0) {
+            // If any gamepads are present in non-MC mode, set only gamepad 1.
+            gamepadMask = 1;
+        }
+        if (prefConfig.onscreenController) {
+            // If we're using OSC, always set at least gamepad 1.
+            gamepadMask |= 1;
+        }
+
+        // Set to the optimal mode for streaming
+        float displayRefreshRate = prepareDisplayForRendering();
+        LimeLog.info("Display refresh rate: "+displayRefreshRate);
+
+        // HACK: Despite many efforts to ensure low latency consistent frame
+        // delivery, the best non-lossy mechanism is to buffer 1 extra frame
+        // in the output pipeline. Android does some buffering on its end
+        // in SurfaceFlinger and it's difficult (impossible?) to inspect
+        // the precise state of the buffer queue to the screen after we
+        // release a frame for rendering.
+        //
+        // Since buffering a frame adds latency and we are primarily a
+        // latency-optimized client, rather than one designed for picture-perfect
+        // accuracy, we will synthetically induce a negative pressure on the display
+        // output pipeline by driving the decoder input pipeline under the speed
+        // that the display can refresh. This ensures a constant negative pressure
+        // to keep latency down but does induce a periodic frame loss. However, this
+        // periodic frame loss is *way* less than what we'd already get in Marshmallow's
+        // display pipeline where frames are dropped outside of our control if they land
+        // on the same V-sync.
+        //
+        // Hopefully, we can get rid of this once someone comes up with a better way
+        // to track the state of the pipeline and time frames.
+        int roundedRefreshRate = Math.round(displayRefreshRate);
+        if (!prefConfig.disableFrameDrop && prefConfig.fps >= roundedRefreshRate) {
+            if (roundedRefreshRate <= 49) {
+                // Let's avoid clearly bogus refresh rates and fall back to legacy rendering
+                decoderRenderer.enableLegacyFrameDropRendering();
+                LimeLog.info("Bogus refresh rate: "+roundedRefreshRate);
+            }
+            // HACK: Avoid crashing on some MTK devices
+            else if (roundedRefreshRate == 50 && decoderRenderer.is49FpsBlacklisted()) {
+                // Use the old rendering strategy on these broken devices
+                decoderRenderer.enableLegacyFrameDropRendering();
+            }
+            else {
+                prefConfig.fps = roundedRefreshRate - 1;
+                LimeLog.info("Adjusting FPS target for screen to "+prefConfig.fps);
+            }
+        }
+
         StreamConfiguration config = new StreamConfiguration.Builder()
                 .setResolution(prefConfig.width, prefConfig.height)
                 .setRefreshRate(prefConfig.fps)
@@ -302,11 +353,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 .setBitrate(prefConfig.bitrate * 1000)
                 .setEnableSops(prefConfig.enableSops)
                 .enableLocalAudioPlayback(prefConfig.playHostAudio)
-                .setMaxPacketSize(remote ? 1024 : 1292)
+                .setMaxPacketSize((remote || prefConfig.width <= 1920) ? 1024 : 1292)
                 .setRemote(remote)
                 .setHevcBitratePercentageMultiplier(75)
                 .setHevcSupported(decoderRenderer.isHevcSupported())
                 .setEnableHdr(willStreamHdr)
+                .setAttachedGamepadMask(gamepadMask)
+                .setClientRefreshRateX100((int)(displayRefreshRate * 100))
                 .setAudioConfiguration(prefConfig.enable51Surround ?
                         MoonBridge.AUDIO_CONFIGURATION_51_SURROUND :
                         MoonBridge.AUDIO_CONFIGURATION_STEREO)
@@ -318,9 +371,6 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         InputManager inputManager = (InputManager) getSystemService(Context.INPUT_SERVICE);
         inputManager.registerInputDeviceListener(controllerHandler, null);
-
-        // Set to the optimal mode for streaming
-        prepareDisplayForRendering();
 
         // Initialize touch contexts
         for (int i = 0; i < touchContextMap.length; i++) {
@@ -396,9 +446,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         }
     }
 
-    private void prepareDisplayForRendering() {
+    private float prepareDisplayForRendering() {
         Display display = getWindowManager().getDefaultDisplay();
         WindowManager.LayoutParams windowLayoutParams = getWindow().getAttributes();
+        float displayRefreshRate;
 
         // On M, we can explicitly set the optimal display mode
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
@@ -436,6 +487,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             LimeLog.info("Selected display mode: "+bestMode.getPhysicalWidth()+"x"+
                     bestMode.getPhysicalHeight()+"x"+bestMode.getRefreshRate());
             windowLayoutParams.preferredDisplayModeId = bestMode.getModeId();
+            displayRefreshRate = bestMode.getRefreshRate();
         }
         // On L, we can at least tell the OS that we want 60 Hz
         else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -448,6 +500,12 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             }
             LimeLog.info("Selected refresh rate: "+bestRefreshRate);
             windowLayoutParams.preferredRefreshRate = bestRefreshRate;
+            displayRefreshRate = bestRefreshRate;
+        }
+        else {
+            // Otherwise, the active display refresh rate is just
+            // whatever is currently in use.
+            displayRefreshRate = display.getRefreshRate();
         }
 
         // Apply the display mode change
@@ -483,6 +541,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             // Set the surface to scale based on the aspect ratio of the stream
             streamView.setDesiredAspectRatio((double)prefConfig.width / (double)prefConfig.height);
         }
+
+        return displayRefreshRate;
     }
 
     @SuppressLint("InlinedApi")
@@ -724,6 +784,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             return super.onKeyDown(keyCode, event);
         }
 
+        // Handle a synthetic back button event that some Android OS versions
+        // create as a result of a right-click.
+        if (event.getSource() == InputDevice.SOURCE_MOUSE && event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            conn.sendMouseButtonDown(MouseButtonPacket.BUTTON_RIGHT);
+            return true;
+        }
+
         boolean handled = false;
 
         boolean detectedGamepad = event.getDevice() != null && ((event.getDevice().getSources() & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK ||
@@ -764,6 +831,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         // Pass-through virtual navigation keys
         if ((event.getFlags() & KeyEvent.FLAG_VIRTUAL_HARD_KEY) != 0) {
             return super.onKeyUp(keyCode, event);
+        }
+
+        // Handle a synthetic back button event that some Android OS versions
+        // create as a result of a right-click.
+        if (event.getSource() == InputDevice.SOURCE_MOUSE && event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            conn.sendMouseButtonUp(MouseButtonPacket.BUTTON_RIGHT);
+            return true;
         }
 
         boolean handled = false;

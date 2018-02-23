@@ -14,8 +14,10 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.view.InputDevice;
+import android.widget.Toast;
 
 import com.limelight.LimeLog;
+import com.limelight.R;
 
 import java.util.ArrayList;
 
@@ -121,7 +123,17 @@ public class UsbDriverService extends Service implements UsbDriverListener {
             // Do we have permission yet?
             if (!usbManager.hasPermission(device)) {
                 // Let's ask for permission
-                usbManager.requestPermission(device, PendingIntent.getBroadcast(UsbDriverService.this, 0, new Intent(ACTION_USB_PERMISSION), 0));
+                try {
+                    // This function is not documented as throwing any exceptions (denying access
+                    // is indicated by calling the PendingIntent with a false result). However,
+                    // Samsung Knox has some policies which block this request, but rather than
+                    // just returning a false result or returning 0 enumerated devices,
+                    // they throw an undocumented SecurityException from this call, crashing
+                    // the whole app. :(
+                    usbManager.requestPermission(device, PendingIntent.getBroadcast(UsbDriverService.this, 0, new Intent(ACTION_USB_PERMISSION), 0));
+                } catch (SecurityException e) {
+                    Toast.makeText(this, this.getText(R.string.error_usb_prohibited), Toast.LENGTH_LONG).show();
+                }
                 return;
             }
 
@@ -157,7 +169,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
         }
     }
 
-    private boolean isRecognizedInputDevice(UsbDevice device) {
+    private static boolean isRecognizedInputDevice(UsbDevice device) {
         // On KitKat and later, we can determine if this VID and PID combo
         // matches an existing input device and defer to the built-in controller
         // support in that case. Prior to KitKat, we'll always return true to be safe.
@@ -182,7 +194,7 @@ public class UsbDriverService extends Service implements UsbDriverListener {
         }
     }
 
-    private boolean shouldClaimDevice(UsbDevice device) {
+    public static boolean shouldClaimDevice(UsbDevice device) {
         // We always bind to XB1 controllers but only bind to XB360 controllers
         // if we know the kernel isn't already driving this device.
         return XboxOneController.canClaimDevice(device) ||

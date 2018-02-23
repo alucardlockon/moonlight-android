@@ -3,8 +3,10 @@ package com.limelight.computers;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.StringReader;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.UnknownHostException;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.UUID;
@@ -35,7 +37,7 @@ public class ComputerManagerService extends Service {
     private static final int APPLIST_POLLING_PERIOD_MS = 30000;
     private static final int APPLIST_FAILED_POLLING_RETRY_MS = 2000;
     private static final int MDNS_QUERY_PERIOD_MS = 1000;
-    private static final int FAST_POLL_TIMEOUT = 500;
+    private static final int FAST_POLL_TIMEOUT = 1000;
     private static final int OFFLINE_POLL_TRIES = 5;
     private static final int INITIAL_POLL_TRIES = 2;
     private static final int EMPTY_LIST_THRESHOLD = 3;
@@ -132,7 +134,7 @@ public class ComputerManagerService extends Service {
             public void run() {
 
                 int offlineCount = 0;
-                while (!isInterrupted() && pollingActive) {
+                while (!isInterrupted() && pollingActive && tuple.thread == this) {
                     try {
                         // Only allow one request to the machine at a time
                         synchronized (tuple.networkLock) {
@@ -367,6 +369,10 @@ public class ComputerManagerService extends Service {
             return true;
         }
         else {
+            if (!manuallyAdded) {
+                LimeLog.warning("Auto-discovered PC failed to respond: "+addr);
+            }
+
             return false;
         }
     }
@@ -386,6 +392,7 @@ public class ComputerManagerService extends Service {
                     if (tuple.thread != null) {
                         // Interrupt the thread on this entry
                         tuple.thread.interrupt();
+                        tuple.thread = null;
                     }
                     pollingTuples.remove(tuple);
                     break;
@@ -500,14 +507,26 @@ public class ComputerManagerService extends Service {
         return ComputerDetails.Reachability.OFFLINE;
     }
 
+    private static boolean isAddressLikelyLocal(String str) {
+        try {
+            // This will tend to be wrong for IPv6 but falling back to
+            // remote will be fine in that case. For IPv4, it should be
+            // pretty accurate due to NAT prevalence.
+            InetAddress addr = InetAddress.getByName(str);
+            return addr.isSiteLocalAddress() || addr.isLinkLocalAddress();
+        } catch (UnknownHostException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
     private ReachabilityTuple pollForReachability(ComputerDetails details) throws InterruptedException {
         ComputerDetails polledDetails;
         ComputerDetails.Reachability reachability;
 
-        // If the local address is routable across the Internet,
-        // always consider this PC remote to be conservative
         if (details.localAddress.equals(details.remoteAddress)) {
-            reachability = ComputerDetails.Reachability.REMOTE;
+            reachability = isAddressLikelyLocal(details.localAddress) ?
+                    ComputerDetails.Reachability.LOCAL : ComputerDetails.Reachability.REMOTE;
         }
         else {
             // Do a TCP-level connection to the HTTP server to see if it's listening
@@ -553,7 +572,14 @@ public class ComputerManagerService extends Service {
             return null;
         }
 
-        if (polledDetails.remoteAddress.equals(reachableAddr)) {
+        // If both addresses are the same, guess whether we're local based on
+        // IP address heuristics.
+        if (reachableAddr.equals(polledDetails.localAddress) &&
+                reachableAddr.equals(polledDetails.remoteAddress)) {
+            polledDetails.reachability = isAddressLikelyLocal(reachableAddr) ?
+                    ComputerDetails.Reachability.LOCAL : ComputerDetails.Reachability.REMOTE;
+        }
+        else if (polledDetails.remoteAddress.equals(reachableAddr)) {
             polledDetails.reachability = ComputerDetails.Reachability.REMOTE;
         }
         else if (polledDetails.localAddress.equals(reachableAddr)) {
@@ -815,6 +841,7 @@ public class ComputerManagerService extends Service {
                     } while (waitPollingDelay());
                 }
             };
+            thread.setName("App list polling thread for " + computer.localAddress);
             thread.start();
         }
 
