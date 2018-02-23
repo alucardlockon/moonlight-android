@@ -63,7 +63,7 @@
 
     <!-- General strings -->
     <string name="ip_hint"> 串流电脑的IP地址 </string>
-    <string name="searching_pc"> 正在搜寻运行着GAMESTREAM的电脑…… \n\n
+    <string name="searching_pc"> into the vrains! 正在搜寻运行着GAMESTREAM的电脑…… \n\n
         确保GeForce Experience里面SHIELD选项里面的GAMESTREAM开关是开着的 </string>
     <string name="yes"> 是 </string>
     <string name="no"> 否 </string>

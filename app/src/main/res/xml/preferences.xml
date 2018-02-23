@@ -9,7 +9,7 @@
             android:summary="@string/summary_resolution_list"
             android:entries="@array/resolution_names"
             android:entryValues="@array/resolution_values"
-            android:defaultValue="720p60" />
+            android:defaultValue="MIX2-60" />
         <com.limelight.preferences.SeekBarPreference
             android:key="seekbar_bitrate"
             android:dialogMessage="@string/summary_seekbar_bitrate"

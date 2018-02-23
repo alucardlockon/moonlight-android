@@ -7,6 +7,8 @@
         <item>1080p 60 FPS</item>
         <item>4K 30 FPS</item>
         <item>4K 60 FPS</item>
+        <item>Mix2 30 FPS</item>
+        <item>Mix2 60 FPS</item>
     </string-array>
     <string-array name="resolution_values" translatable="false">
         <item>720p30</item>
@@ -15,6 +17,8 @@
         <item>1080p60</item>
         <item>4K30</item>
         <item>4K60</item>
+        <item>MIX2-30</item>
+        <item>MIX2-60</item>
     </string-array>
 
     <string-array name="language_names" translatable="false">
